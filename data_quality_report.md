@@ -1,7 +1,7 @@
 # Data Quality Report
 ## D2C Customer Churn Capstone — Part 1
 
-**Prepared by:** [Your Name]  
+**Prepared by:** Adhiyan
 **Snapshot Date:** 2025-09-30  
 **Datasets Audited:** customers, orders, support_tickets, web_events_snapshot, churn_labels, rfm_modeling_snapshot, intervention_history
 
