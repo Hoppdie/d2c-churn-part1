@@ -1,9 +1,9 @@
 # Data Quality Report
 ## D2C Customer Churn Capstone — Part 1
 
-**Prepared by:** Adhiyan
 **Snapshot Date:** 2025-09-30  
-**Datasets Audited:** customers, orders, support_tickets, web_events_snapshot, churn_labels, rfm_modeling_snapshot, intervention_history
+**Datasets Audited:** customers, orders, support_tickets, web_events_snapshot, churn_labels, rfm_modeling_snapshot, intervention_history  
+**Universe:** 2,400 customers
 
 ---
 
@@ -11,78 +11,87 @@
 
 | Dataset | Column | Missing Count | Missing % | Impact | Recommended Treatment |
 |---|---|---|---|---|---|
-| `customers.csv` | `loyalty_tier` | ~1,386 | ~57.8% | High — signals non-enrolment, strongly correlated with churn | **Do not impute.** Create a binary flag `loyalty_enrolled` (0/1) and keep nulls as a distinct category "Not Enrolled" |
-| `customers.csv` | `skin_type` | ~401 | ~16.7% | Medium — useful for product personalisation but not a direct churn driver | Impute with mode or treat null as a separate category "Not Provided" |
-| `orders.csv` | `rating` | ~80 | ~0.8% | Low — small proportion; affects average rating calculations | Exclude from rating averages using `dropna()`; do not impute artificially |
+| `customers.csv` | `loyalty_tier` | 1,386 | 57.8% | High — signals non-enrolment | Do **not** impute. Create binary flag `loyalty_enrolled` and keep nulls as category "Not Enrolled" |
+| `customers.csv` | `skin_type` | 401 | 16.7% | Medium — personalisation field | Treat null as separate "Not Provided" category |
+| `orders.csv` | `rating` | 80 (raw) / 58 (pre-snapshot) | 0.8% / 0.7% | Low | Exclude from rating averages with `dropna()`; do not impute |
+| `rfm_modeling_snapshot.csv` | `loyalty_tier` | 1,386 | 57.8% | Same as customers | Same treatment |
 
-**Key insight:** The `loyalty_tier` nulls are not random — they represent customers who were never enrolled in the loyalty programme. Analysis shows these customers have a higher churn rate than enrolled customers. Treating these nulls as "missing" rather than "not enrolled" would introduce a modelling error.
+**Key insight:** The `loyalty_tier` nulls are not random — they mark customers never enrolled in the loyalty programme. However, our EDA found these non-enrolled customers churn at 48.3%, which is **not** meaningfully higher than enrolled Silver members (48.8%). Only Gold (40.8%) and Platinum (37.1%) members churn notably less. So loyalty enrolment alone is a weak churn signal — tier level matters more than enrolment status.
+
+**Notable:** Unrated orders have a higher return rate (10.3%) than rated orders (6.5%), suggesting customers who don't leave ratings are more likely to have had a return — a small but real data-quality signal worth noting.
 
 ---
 
 ## 2. Duplicate / Duplicate-Like Records
 
-| Dataset | Issue | Count | Detail | Recommended Treatment |
+| Dataset | Issue | Count | Detail | Treatment |
 |---|---|---|---|---|
-| `orders.csv` | `_DUP` suffix order IDs | Present | Intentional simulation of real-world deduplication challenges | **Remove before analysis and modelling.** Filter: `orders[~orders['order_id'].str.endswith('_DUP')]` |
-| All datasets | Exact row duplicates | 0 | No exact duplicate rows found across any dataset | No action needed |
+| `orders.csv` | `_DUP` suffix order IDs | 12 | Intentional duplicate-like records | **Removed before analysis.** Filter `~order_id.str.endswith('_DUP')` |
+| All datasets | Exact duplicate rows | 0 | None found | No action needed |
+
+Raw orders: 10,009 → Clean orders (after removing 12 `_DUP`): **9,997**
 
 ---
 
 ## 3. Outlier Values
 
-| Dataset | Column | Issue | Detail | Recommended Treatment |
-|---|---|---|---|---|
-| `orders.csv` | `gross_amount` | Extreme high values | Max value ₹24,789 vs median ~₹500–800; values above 99th percentile are likely data entry errors or bulk orders | Cap at 99th percentile for feature engineering; flag for business review |
-| `orders.csv` | `discount_pct` | Up to 70% discount | Values of 0.7 (70%) are unusually high for a personal-care brand | Investigate whether these are clearance sales or data errors; keep but flag |
-| `support_tickets.csv` | `resolution_hours` | Up to 74.6 hours | Near 3-day resolution times indicate either complex issues or SLA breaches | Retain as-is; useful signal for churn risk |
+| Dataset | Column | Detail | Treatment |
+|---|---|---|---|
+| `orders.csv` | `gross_amount` | Max ₹24,789 vs 99th percentile ₹2,343. 82 orders (1.0%) above p99 | Cap at 99th percentile for feature engineering; flag for business review |
+| `orders.csv` | `discount_pct` | Values up to 0.70 (70% off) | Investigate clearance vs error; retain but flag |
+| `support_tickets.csv` | `resolution_hours` | Up to ~74.6 hours | Retain — useful churn signal |
 
 ---
 
-## 4. Post-Snapshot Leakage Risk
+## 4. Post-Snapshot Leakage Risk (CRITICAL)
 
-| Dataset | Column | Issue | Detail |
-|---|---|---|---|
-| `orders.csv` | `order_date` | Contains post-snapshot rows | Orders dated after `2025-09-30` exist **only** to construct churn labels. These rows **must not** be used as model features. Filter strictly: `orders[orders['order_date'] <= '2025-09-30']` |
-| `rfm_modeling_snapshot.csv` | `churn_next_60d` | Target variable included in feature table | This column must be excluded from all model inputs. It is the label, not a feature. |
+| Dataset | Column | Detail |
+|---|---|---|
+| `orders.csv` | `order_date` | 1,869 orders dated after 2025-09-30 (range 2025-10-01 → 2025-11-29) exist **only** for label construction. **Must not** be used as features. |
+| `rfm_modeling_snapshot.csv` | `churn_next_60d` | This is the target. Must be excluded from model inputs. |
 
-> ⚠️ **Critical:** Any feature derived from post-snapshot order data (e.g., order counts after 2025-09-30) would constitute target leakage and lead to artificially inflated model performance and major mark deductions.
+After filtering to `order_date <= 2025-09-30`: **8,128 pre-snapshot orders** are safe to use as features.
+
+> ⚠️ Any feature derived from the 1,869 post-snapshot orders would be target leakage and lead to major mark deductions.
 
 ---
 
 ## 5. Join / Key Issues
 
-| Join | Expected Universe | Actual Match | Issue |
-|---|---|---|---|
-| `customers` → `orders` | 2,400 customers | Not all customers have orders | Expected — new customers may have no order history |
-| `customers` → `support_tickets` | 2,400 customers | ~1,921 unique tickets; not all customers have tickets | Expected — not every customer raises a support ticket |
-| `customers` → `web_events_snapshot` | 2,400 customers | 2,400 rows | Perfect 1:1 join ✓ |
-| `customers` → `churn_labels` | 2,400 customers | 2,400 rows | Perfect 1:1 join ✓ |
-| `customers` → `rfm_modeling_snapshot` | 2,400 customers | 2,400 rows | Perfect 1:1 join ✓ |
-| `customers` → `intervention_history` | 2,400 customers | 2,400 rows | Perfect 1:1 join ✓ |
+All joins are left joins from `customers` (universe = 2,400). Join coverage verified:
 
-**Recommendation:** Always use a **left join from `customers`** as the base. This ensures all 2,400 customers are retained. Customers with no orders or tickets will have `NaN` in joined columns — fill these with 0 for count/rate features.
+| Join | Coverage | Unmatched | Note |
+|---|---|---|---|
+| customers → orders | 100.0% | 0 | All order customer_ids exist in customers |
+| customers → support_tickets | 100.0% | 0 | 1,153 customers (48.0%) have zero tickets — expected |
+| customers → web_events_snapshot | 100.0% | 0 | Perfect 1:1 |
+| customers → churn_labels | 100.0% | 0 | Perfect 1:1 |
+| customers → rfm_modeling_snapshot | 100.0% | 0 | Perfect 1:1 |
+| customers → intervention_history | 100.0% | 0 | Perfect 1:1 |
+
+**Recommendation:** Use left join from `customers`. Fill missing ticket/order counts with 0 for customers with no history.
 
 ---
 
 ## 6. Date Consistency
 
-| Check | Result | Detail |
-|---|---|---|
-| `customers.signup_date` > snapshot | 0 violations | All signups are on or before 2025-09-30 ✓ |
-| `support_tickets.ticket_date` > snapshot | 0 violations | All tickets are on or before 2025-09-30 ✓ |
-| `orders.order_date` range | 2024-01-09 to 2025-11-29 | Post-snapshot rows intentionally present for label construction |
-| `web_events_snapshot.snapshot_date` | All = 2025-09-30 | Consistent ✓ |
+| Check | Result |
+|---|---|
+| `customers.signup_date` > snapshot | 0 violations ✓ |
+| `support_tickets.ticket_date` > snapshot | 0 violations ✓ |
+| `orders.order_date` range | 2024 → 2025-11-29 (post-snapshot rows intentional) |
+| `web_events_snapshot.snapshot_date` | All = 2025-09-30 ✓ |
 
 ---
 
 ## 7. Columns That May Cause Leakage If Used Incorrectly
 
-| Column | File | Risk | Safe to Use? |
+| Column | File | Risk | Safe? |
 |---|---|---|---|
-| `churn_next_60d` | `rfm_modeling_snapshot.csv`, `churn_labels.csv` | **Direct target leakage** — this IS the label | ❌ Never as a feature |
-| `order_date > 2025-09-30` | `orders.csv` | **Temporal leakage** — future purchases used to predict churn | ❌ Filter out before feature creation |
-| `split` | `churn_labels.csv`, `rfm_modeling_snapshot.csv` | No leakage risk but must not be used as a feature | ✅ Use only for train/val/test splitting |
-| All columns in `rfm_modeling_snapshot.csv` (except target/split) | `rfm_modeling_snapshot.csv` | Pre-built, leakage-free — all derived from pre-snapshot data | ✅ Safe to use |
+| `churn_next_60d` | rfm_modeling_snapshot, churn_labels | Direct target | ❌ Never a feature |
+| Post-snapshot `order_date` rows | orders | Temporal leakage | ❌ Filter out |
+| `split` | churn_labels, rfm_modeling_snapshot | Splitting only | ✅ Not as feature |
+| All other rfm_modeling_snapshot columns | rfm_modeling_snapshot | Pre-built, leakage-free | ✅ Safe |
 
 ---
 
@@ -90,10 +99,12 @@
 
 | Priority | Action |
 |---|---|
-| 🔴 Critical | Filter `orders.csv` to `order_date <= 2025-09-30` before any feature engineering |
-| 🔴 Critical | Remove `_DUP` order records before analysis |
-| 🔴 Critical | Never use `churn_next_60d` as a model feature |
-| 🟡 High | Treat `loyalty_tier` nulls as "Not Enrolled" — do not impute with mode |
-| 🟡 High | Cap `gross_amount` outliers at 99th percentile for robust feature computation |
-| 🟢 Medium | Fill missing `rating` values with `NaN` exclusion in aggregations |
-| 🟢 Medium | Use left join from `customers` as the base for all merges; fill missing ticket/order counts with 0 |
+| 🔴 Critical | Filter orders to `order_date <= 2025-09-30` (drops 1,869 rows) |
+| 🔴 Critical | Remove 12 `_DUP` order records |
+| 🔴 Critical | Never use `churn_next_60d` as a feature |
+| 🟡 High | Treat 1,386 `loyalty_tier` nulls as "Not Enrolled" |
+| 🟡 High | Cap `gross_amount` at p99 (₹2,343) for robust features |
+| 🟢 Medium | Exclude 58 null ratings from averages |
+| 🟢 Medium | Fill missing ticket/order counts with 0 after left join |
+
+**Dataset headline:** 2,400 customers, 47.0% overall churn rate (balanced classes), 8,128 usable pre-snapshot orders, 1,247 customers (52%) with at least one support ticket.
